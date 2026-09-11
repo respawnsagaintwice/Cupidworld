@@ -283,60 +283,66 @@ declare
   v_member_count int;
   v_existing_world uuid;
 begin
+  -- 1. Unauthenticated users must not see ANY world information
   v_user_id := auth.uid();
+  if v_user_id is null then
+    return jsonb_build_object(
+      'valid', false,
+      'code', 'UNAUTHENTICATED',
+      'message', 'First, come in as yourself ♡ Create an account or log in before joining your person''s world.'
+    );
+  end if;
+
   v_clean_code := upper(trim(p_code));
 
   if v_clean_code = '' then
     return jsonb_build_object('valid', false, 'code', 'INVITE_NOT_FOUND', 'message', 'This invite doesn''t seem to exist ♡');
   end if;
 
-  -- 1. Check if invite exists
+  -- 2. Check if invite exists
   select * into v_invite from public.couple_invites where invite_code = v_clean_code;
   if not found then
     return jsonb_build_object('valid', false, 'code', 'INVITE_NOT_FOUND', 'message', 'This invite doesn''t seem to exist ♡');
   end if;
 
-  -- 2. Check if expired (default 7 days)
+  -- 3. Check if expired (default 7 days)
   if v_invite.expires_at <= now() then
     return jsonb_build_object('valid', false, 'code', 'INVITE_EXPIRED', 'message', 'This invite has expired ♡');
   end if;
 
-  -- 3. Check if already used
+  -- 4. Check if already used
   if v_invite.used_by is not null or v_invite.used_at is not null then
     return jsonb_build_object('valid', false, 'code', 'INVITE_ALREADY_USED', 'message', 'This invite has already been used ♡');
   end if;
 
-  -- 4. Check if world exists
+  -- 5. Check if world exists
   select * into v_couple from public.couples where id = v_invite.couple_id;
   if not found then
     return jsonb_build_object('valid', false, 'code', 'INVITE_NOT_FOUND', 'message', 'This invite doesn''t seem to exist ♡');
   end if;
 
-  -- 5. Check world capacity
+  -- 6. Check world capacity
   select count(*) into v_member_count from public.couple_members where couple_id = v_couple.id;
   if v_member_count >= 2 then
     return jsonb_build_object('valid', false, 'code', 'WORLD_FULL', 'message', 'This little world is already full ♡ Only two partners can share a world.');
   end if;
 
-  -- If user is authenticated, check user-specific constraints
-  if v_user_id is not null then
-    -- Check if user is the creator
-    if v_invite.created_by = v_user_id then
-      return jsonb_build_object('valid', false, 'code', 'SELF_JOIN', 'message', 'This is already your little world ♡ You don''t need to join it again.');
-    end if;
+  -- 7. Check if user is the creator
+  if v_invite.created_by = v_user_id then
+    return jsonb_build_object('valid', false, 'code', 'SELF_JOIN', 'message', 'This is already your little world ♡ You don''t need to join it again.');
+  end if;
 
-    -- Check if user already belongs to ANY world
-    select couple_id into v_existing_world from public.couple_members where user_id = v_user_id limit 1;
-    if v_existing_world is not null then
-      if v_existing_world = v_couple.id then
-        return jsonb_build_object('valid', false, 'code', 'SELF_JOIN', 'message', 'This is already your little world ♡ You don''t need to join it again.');
-      else
-        return jsonb_build_object('valid', false, 'code', 'ALREADY_IN_WORLD', 'message', 'You''re already part of another little world ♡');
-      end if;
+  -- 8. Check if user already belongs to ANY world
+  select couple_id into v_existing_world from public.couple_members where user_id = v_user_id limit 1;
+  if v_existing_world is not null then
+    if v_existing_world = v_couple.id then
+      return jsonb_build_object('valid', false, 'code', 'SELF_JOIN', 'message', 'This is already your little world ♡ You don''t need to join it again.');
+    else
+      return jsonb_build_object('valid', false, 'code', 'ALREADY_IN_WORLD', 'message', 'You''re already part of another little world ♡');
     end if;
   end if;
 
-  -- Creator details
+  -- 9. Creator details
   select display_name into v_creator from public.profiles where id = v_invite.created_by;
 
   return jsonb_build_object(
@@ -460,87 +466,142 @@ alter table public.love_notes enable row level security;
 alter table public.relationship_events enable row level security;
 
 -- POLICIES
+drop policy if exists "Profiles select" on public.profiles;
 create policy "Profiles select" on public.profiles
   for select using (
     id = auth.uid() or 
     id in (select user_id from public.couple_members where couple_id = public.get_user_couple_id(auth.uid()))
   );
+
+drop policy if exists "Profiles update" on public.profiles;
 create policy "Profiles update" on public.profiles
   for update using (id = auth.uid());
+
+drop policy if exists "Profiles insert" on public.profiles;
 create policy "Profiles insert" on public.profiles
   for insert with check (id = auth.uid());
 
+drop policy if exists "Couples select" on public.couples;
 create policy "Couples select" on public.couples
   for select using (id = public.get_user_couple_id(auth.uid()));
+
+drop policy if exists "Couples update" on public.couples;
 create policy "Couples update" on public.couples
   for update using (id = public.get_user_couple_id(auth.uid()));
-create policy "Couples insert" on public.couples
-  for insert with check (auth.role() = 'authenticated');
 
+-- Direct client inserts denied; world creation MUST go through create_world_and_invite()
+drop policy if exists "Couples insert" on public.couples;
+create policy "Couples insert" on public.couples
+  for insert with check (false);
+
+drop policy if exists "Members select" on public.couple_members;
 create policy "Members select" on public.couple_members
   for select using (couple_id = public.get_user_couple_id(auth.uid()) or user_id = auth.uid());
-create policy "Members insert" on public.couple_members
-  for insert with check (user_id = auth.uid());
 
+-- Direct client inserts denied; world joins MUST go through join_world_with_invite()
+drop policy if exists "Members insert" on public.couple_members;
+create policy "Members insert" on public.couple_members
+  for insert with check (false);
+
+drop policy if exists "Invites select" on public.couple_invites;
 create policy "Invites select" on public.couple_invites
   for select using (
     couple_id = public.get_user_couple_id(auth.uid()) or 
     created_by = auth.uid()
   );
-create policy "Invites insert" on public.couple_invites
-  for insert with check (created_by = auth.uid());
 
+-- Direct client inserts denied; invite generation MUST go through create_world_and_invite()
+drop policy if exists "Invites insert" on public.couple_invites;
+create policy "Invites insert" on public.couple_invites
+  for insert with check (false);
+
+drop policy if exists "Memories select" on public.memories;
 create policy "Memories select" on public.memories
   for select using (couple_id = public.get_user_couple_id(auth.uid()));
+
+drop policy if exists "Memories insert" on public.memories;
 create policy "Memories insert" on public.memories
   for insert with check (couple_id = public.get_user_couple_id(auth.uid()));
+
+drop policy if exists "Memories update" on public.memories;
 create policy "Memories update" on public.memories
   for update using (couple_id = public.get_user_couple_id(auth.uid()));
+
+drop policy if exists "Memories delete" on public.memories;
 create policy "Memories delete" on public.memories
   for delete using (couple_id = public.get_user_couple_id(auth.uid()));
 
+drop policy if exists "Comments select" on public.memory_comments;
 create policy "Comments select" on public.memory_comments
   for select using (memory_id in (select id from public.memories where couple_id = public.get_user_couple_id(auth.uid())));
+
+drop policy if exists "Comments insert" on public.memory_comments;
 create policy "Comments insert" on public.memory_comments
   for insert with check (
     user_id = auth.uid() and 
     memory_id in (select id from public.memories where couple_id = public.get_user_couple_id(auth.uid()))
   );
+
+drop policy if exists "Comments delete" on public.memory_comments;
 create policy "Comments delete" on public.memory_comments
   for delete using (user_id = auth.uid());
 
+drop policy if exists "Reactions select" on public.memory_reactions;
 create policy "Reactions select" on public.memory_reactions
   for select using (memory_id in (select id from public.memories where couple_id = public.get_user_couple_id(auth.uid())));
+
+drop policy if exists "Reactions insert" on public.memory_reactions;
 create policy "Reactions insert" on public.memory_reactions
   for insert with check (
     user_id = auth.uid() and 
     memory_id in (select id from public.memories where couple_id = public.get_user_couple_id(auth.uid()))
   );
+
+drop policy if exists "Reactions delete" on public.memory_reactions;
 create policy "Reactions delete" on public.memory_reactions
   for delete using (user_id = auth.uid());
 
+drop policy if exists "Dates select" on public.important_dates;
 create policy "Dates select" on public.important_dates
   for select using (couple_id = public.get_user_couple_id(auth.uid()));
+
+drop policy if exists "Dates insert" on public.important_dates;
 create policy "Dates insert" on public.important_dates
   for insert with check (couple_id = public.get_user_couple_id(auth.uid()));
+
+drop policy if exists "Dates update" on public.important_dates;
 create policy "Dates update" on public.important_dates
   for update using (couple_id = public.get_user_couple_id(auth.uid()));
+
+drop policy if exists "Dates delete" on public.important_dates;
 create policy "Dates delete" on public.important_dates
   for delete using (couple_id = public.get_user_couple_id(auth.uid()));
 
+drop policy if exists "Notes select" on public.love_notes;
 create policy "Notes select" on public.love_notes
   for select using (couple_id = public.get_user_couple_id(auth.uid()));
+
+drop policy if exists "Notes insert" on public.love_notes;
 create policy "Notes insert" on public.love_notes
   for insert with check (couple_id = public.get_user_couple_id(auth.uid()) and author_id = auth.uid());
+
+drop policy if exists "Notes delete" on public.love_notes;
 create policy "Notes delete" on public.love_notes
   for delete using (author_id = auth.uid());
 
+drop policy if exists "Events select" on public.relationship_events;
 create policy "Events select" on public.relationship_events
   for select using (couple_id = public.get_user_couple_id(auth.uid()));
+
+drop policy if exists "Events insert" on public.relationship_events;
 create policy "Events insert" on public.relationship_events
   for insert with check (couple_id = public.get_user_couple_id(auth.uid()));
+
+drop policy if exists "Events update" on public.relationship_events;
 create policy "Events update" on public.relationship_events
   for update using (couple_id = public.get_user_couple_id(auth.uid()));
+
+drop policy if exists "Events delete" on public.relationship_events;
 create policy "Events delete" on public.relationship_events
   for delete using (couple_id = public.get_user_couple_id(auth.uid()));
 
@@ -549,6 +610,7 @@ insert into storage.buckets (id, name, public)
 values ('couple-memories', 'couple-memories', false)
 on conflict (id) do nothing;
 
+drop policy if exists "Couple members can view photos" on storage.objects;
 create policy "Couple members can view photos"
 on storage.objects for select
 using (
@@ -556,9 +618,24 @@ using (
   and (storage.foldername(name))[1] = public.get_user_couple_id(auth.uid())::text
 );
 
+drop policy if exists "Couple members can upload photos" on storage.objects;
 create policy "Couple members can upload photos"
 on storage.objects for insert
 with check (
   bucket_id = 'couple-memories' 
   and (storage.foldername(name))[1] = public.get_user_couple_id(auth.uid())::text
 );
+
+-- =========================================================
+-- FUNCTION EXECUTION PERMISSIONS
+-- =========================================================
+-- Revoke execution from public and anon (anonymous users cannot call these RPCs directly)
+revoke execute on function public.create_world_and_invite(text, date, text) from public, anon;
+revoke execute on function public.validate_world_invite(text) from public, anon;
+revoke execute on function public.join_world_with_invite(text) from public, anon;
+
+-- Grant execution to authenticated users and service_role
+grant execute on function public.create_world_and_invite(text, date, text) to authenticated, service_role;
+grant execute on function public.validate_world_invite(text) to authenticated, service_role;
+grant execute on function public.join_world_with_invite(text) to authenticated, service_role;
+grant execute on function public.get_user_couple_id(uuid) to authenticated, service_role;
