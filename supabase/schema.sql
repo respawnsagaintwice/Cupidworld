@@ -179,6 +179,8 @@ $$;
 create or replace function public.check_couple_member_limit()
 returns trigger
 language plpgsql
+security definer
+set search_path = public
 as $$
 declare
   member_count int;
@@ -299,6 +301,10 @@ begin
     return jsonb_build_object('valid', false, 'code', 'INVITE_NOT_FOUND', 'message', 'This invite doesn''t seem to exist ♡');
   end if;
 
+  if v_clean_code not like 'WORLD-%' then
+    v_clean_code := 'WORLD-' || v_clean_code;
+  end if;
+
   -- 2. Check if invite exists
   select * into v_invite from public.couple_invites where invite_code = v_clean_code;
   if not found then
@@ -381,6 +387,10 @@ begin
   v_clean_code := upper(trim(p_code));
   if v_clean_code = '' then
     return jsonb_build_object('success', false, 'code', 'INVITE_NOT_FOUND', 'message', 'This invite doesn''t seem to exist ♡');
+  end if;
+
+  if v_clean_code not like 'WORLD-%' then
+    v_clean_code := 'WORLD-' || v_clean_code;
   end if;
 
   -- Lock the invite row for update

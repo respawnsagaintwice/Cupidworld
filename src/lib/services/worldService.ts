@@ -28,6 +28,12 @@ export interface JoinWorldResult {
   couple?: Couple;
 }
 
+function normalizeCode(code: string): string {
+  const clean = code.trim().toUpperCase();
+  if (!clean) return '';
+  return clean.startsWith('WORLD-') ? clean : `WORLD-${clean}`;
+}
+
 export const worldService = {
   /**
    * Authoritative validation of an invite code on server / database
@@ -42,34 +48,43 @@ export const worldService = {
       };
     }
 
+    const normalizedCode = normalizeCode(cleanCode);
+
     const supabase = createClient();
     if (supabase) {
       try {
         const { data, error } = await supabase.rpc('validate_world_invite', {
-          p_code: cleanCode,
+          p_code: normalizedCode,
         });
 
         if (error) {
           console.warn('Supabase validate_world_invite rpc error:', error);
         } else if (data) {
-          return data as InviteValidationResult;
+          // If valid or authoritative business rejection in Supabase
+          if (data.valid || data.code !== 'INVITE_NOT_FOUND') {
+            return data as InviteValidationResult;
+          }
         }
       } catch (err) {
         console.warn('Supabase validate error:', err);
       }
     }
 
-    // Mirroring authoritative database rules in memoryStore fallback
-    const localResult = memoryStore.validateInviteCode(cleanCode);
+    // Local / server database fallback (for local dev mode or invites stored in server .data/worlds.json)
+    const localResult = memoryStore.validateInviteCode(normalizedCode);
     if (localResult.valid) {
       return localResult;
     }
 
     // If local memory store did not find it, query the server-side API (e.g. cross-browser / incognito sync)
     try {
-      const user = memoryStore.getCurrentUser();
-      const url = `/api/worlds?code=${encodeURIComponent(cleanCode)}${
-        user ? `&userId=${encodeURIComponent(user.id)}` : ''
+      let userId = memoryStore.getCurrentUser()?.id;
+      if (!userId && supabase) {
+        const { data: authData } = await supabase.auth.getUser();
+        userId = authData?.user?.id;
+      }
+      const url = `/api/worlds?code=${encodeURIComponent(normalizedCode)}${
+        userId ? `&userId=${encodeURIComponent(userId)}` : ''
       }`;
       const res = await fetch(url);
       if (res.ok) {
@@ -85,7 +100,11 @@ export const worldService = {
       console.warn('Server fallback validation error:', err);
     }
 
-    return localResult;
+    return {
+      valid: false,
+      code: 'INVITE_NOT_FOUND',
+      message: "This invite doesn't seem to exist ♡",
+    };
   },
 
   /**
@@ -101,49 +120,57 @@ export const worldService = {
       };
     }
 
+    const normalizedCode = normalizeCode(cleanCode);
+
     const supabase = createClient();
     if (supabase) {
       try {
         const { data, error } = await supabase.rpc('join_world_with_invite', {
-          p_code: cleanCode,
+          p_code: normalizedCode,
         });
 
         if (error) {
-          return {
-            success: false,
-            error: error.message || "Failed to join world.",
-          };
-        }
+          console.warn('Supabase join_world_with_invite error:', error);
+        } else if (data) {
+          if (data.success) {
+            // Update partner profile display name if partnerName provided
+            if (partnerName) {
+              const { data: authUser } = await supabase.auth.getUser();
+              if (authUser?.user) {
+                await supabase.from('profiles').update({
+                  display_name: partnerName,
+                  nickname: `${partnerName} ♡`,
+                }).eq('id', authUser.user.id);
+              }
+            }
 
-        if (data) {
-          if (!data.success) {
+            // Fetch full couple details and sync local cache
+            const { data: coupleData } = await supabase
+              .from('couples')
+              .select('*')
+              .eq('id', data.couple_id)
+              .single();
+
+            if (coupleData) {
+              memoryStore.setCouple(coupleData as Couple);
+            }
+
+            return {
+              success: true,
+              couple: (coupleData as Couple) || {
+                id: data.couple_id,
+                name: data.world_name,
+                anniversary_date: data.anniversary_date,
+                created_at: new Date().toISOString(),
+              },
+            };
+          } else if (data.code !== 'INVITE_NOT_FOUND') {
             return {
               success: false,
               code: data.code,
               error: data.message || "Failed to join world.",
             };
           }
-
-          // Fetch full couple details and sync local cache
-          const { data: coupleData } = await supabase
-            .from('couples')
-            .select('*')
-            .eq('id', data.couple_id)
-            .single();
-
-          if (coupleData) {
-            memoryStore.setCouple(coupleData as Couple);
-          }
-
-          return {
-            success: true,
-            couple: (coupleData as Couple) || {
-              id: data.couple_id,
-              name: data.world_name,
-              anniversary_date: data.anniversary_date,
-              created_at: new Date().toISOString(),
-            },
-          };
         }
       } catch (err: unknown) {
         const message = err instanceof Error ? err.message : "Join error occurred.";
@@ -151,24 +178,32 @@ export const worldService = {
       }
     }
 
-    // Try server-side join first for atomic persistence across sessions
+    // Try server-side join first for atomic persistence across sessions (e.g. local dev / hybrid mode)
     const currentUser = memoryStore.getCurrentUser();
+    let effectiveUserId = currentUser?.id;
+    if (!effectiveUserId && supabase) {
+      const { data: authUser } = await supabase.auth.getUser();
+      if (authUser?.user) {
+        effectiveUserId = authUser.user.id;
+      }
+    }
+
     try {
       const res = await fetch('/api/worlds/join', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          code: cleanCode,
+          code: normalizedCode,
           partnerName: partnerName || currentUser?.display_name,
-          userId: currentUser?.id,
+          userId: effectiveUserId,
         }),
       });
 
       if (res.ok) {
         const data = await res.json();
         if (data.success && data.world) {
-          if (currentUser) {
-            memoryStore.associateUserWithWorld(currentUser.id, data.world.couple.id);
+          if (effectiveUserId) {
+            memoryStore.associateUserWithWorld(effectiveUserId, data.world.couple.id);
           }
           memoryStore.saveActiveWorld(data.world, false);
           return {
@@ -187,7 +222,7 @@ export const worldService = {
     }
 
     // Mirroring authoritative database rules in memoryStore fallback
-    const result = memoryStore.joinWorldByCode(cleanCode, partnerName);
+    const result = memoryStore.joinWorldByCode(normalizedCode, partnerName);
     return {
       success: result.success,
       error: result.error,
@@ -206,15 +241,19 @@ export const worldService = {
     const supabase = createClient();
     if (supabase) {
       try {
+        const anniversary = params.anniversaryDate?.trim() || null;
         const { data, error } = await supabase.rpc('create_world_and_invite', {
           p_name: params.worldName?.trim() || 'Our Little World',
-          p_anniversary_date: params.anniversaryDate,
+          p_anniversary_date: anniversary,
           p_cover_image_url: '/images/cute_home_bg.jpg',
         });
 
         if (error) {
-          console.warn('Supabase create_world_and_invite rpc error:', error);
-        } else if (data) {
+          console.error('Supabase create_world_and_invite rpc error:', error);
+          throw new Error(error.message || 'Failed to create world in Supabase.');
+        }
+
+        if (data) {
           const couple: Couple = {
             id: data.couple_id,
             name: data.world_name,
@@ -235,11 +274,12 @@ export const worldService = {
           };
         }
       } catch (err) {
-        console.warn('Supabase create error:', err);
+        console.error('Supabase create error:', err);
+        throw err;
       }
     }
 
-    // Mirroring authoritative database rules in memoryStore fallback
+    // Genuine offline / local fallback mode ONLY when Supabase is not configured
     const { couple } = memoryStore.createWorld({
       worldName: params.worldName,
       anniversaryDate: params.anniversaryDate,

@@ -60,13 +60,23 @@ function JoinContent() {
             };
             setCurrentUser(profile);
             setPartnerName(displayName);
+            memoryStore.setCurrentUser(profile);
+            return;
+          } else {
+            // When Supabase is configured, lack of Supabase session means unauthenticated
+            setIsAuthenticated(false);
+            setCurrentUser(null);
             return;
           }
         } catch (err) {
           console.warn("Auth check error in join page:", err);
+          setIsAuthenticated(false);
+          setCurrentUser(null);
+          return;
         }
       }
 
+      // 2. Offline / local fallback mode ONLY when Supabase is not configured
       const local = memoryStore.getCurrentUser();
       if (local) {
         setIsAuthenticated(true);

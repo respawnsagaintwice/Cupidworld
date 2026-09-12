@@ -35,13 +35,15 @@ export default function CreateCouplePage() {
           }
         } catch (err) {
           console.warn("Auth check error in create page:", err);
+          router.replace('/login?redirect=/onboarding/create');
+          return;
         }
-      }
-
-      const existing = memoryStore.getCurrentUser();
-      if (!existing && !supabase) {
-        router.replace('/login?redirect=/onboarding/create');
-        return;
+      } else {
+        const existing = memoryStore.getCurrentUser();
+        if (!existing) {
+          router.replace('/login?redirect=/onboarding/create');
+          return;
+        }
       }
 
       setCheckingAuth(false);

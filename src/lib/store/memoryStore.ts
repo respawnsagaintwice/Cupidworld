@@ -30,6 +30,14 @@ export interface StoredWorld {
   deleted_ids?: string[];
 }
 
+export interface LocalUserCredential {
+  id: string;
+  email: string;
+  password_hash: string;
+  display_name: string;
+  created_at: string;
+}
+
 // Storage Helpers
 let memoryFallbackStore: Record<string, unknown> = {};
 
@@ -217,6 +225,46 @@ function getStoredInvites(): Record<string, StoredInvite> {
 
 function saveStoredInvites(invites: Record<string, StoredInvite>): void {
   setStored("invites_registry", invites);
+}
+
+// Secure client-side password hashing for genuine offline/local fallback mode
+export async function hashPassword(password: string): Promise<string> {
+  if (typeof crypto !== "undefined" && crypto.subtle) {
+    const encoder = new TextEncoder();
+    const data = encoder.encode(password);
+    const hashBuffer = await crypto.subtle.digest("SHA-256", data);
+    const hashArray = Array.from(new Uint8Array(hashBuffer));
+    return hashArray.map((b) => b.toString(16).padStart(2, "0")).join("");
+  }
+  let hash = 0;
+  for (let i = 0; i < password.length; i++) {
+    hash = (hash << 5) - hash + password.charCodeAt(i);
+    hash |= 0;
+  }
+  return `hash-${Math.abs(hash).toString(16)}`;
+}
+
+// Pre-seeded demo user credentials for offline mode (password: password123)
+const DEMO_PRESEEDED_EMAIL = "mau@gmail.com";
+const DEMO_PRESEEDED_ID = "user-maugmailcom";
+const DEMO_PRESEEDED_HASH = "ef92b778bafe771e89245b89ecbc08a44a4e166c06659911881f383d4473e94f";
+
+function getLocalCredentials(): Record<string, LocalUserCredential> {
+  const creds = getStored<Record<string, LocalUserCredential>>("local_credentials", {});
+  if (!creds[DEMO_PRESEEDED_EMAIL]) {
+    creds[DEMO_PRESEEDED_EMAIL] = {
+      id: DEMO_PRESEEDED_ID,
+      email: DEMO_PRESEEDED_EMAIL,
+      password_hash: DEMO_PRESEEDED_HASH,
+      display_name: "mau",
+      created_at: "2026-01-01T00:00:00.000Z",
+    };
+  }
+  return creds;
+}
+
+function saveLocalCredentials(creds: Record<string, LocalUserCredential>): void {
+  setStored("local_credentials", creds);
 }
 
 /**
@@ -408,6 +456,84 @@ export const memoryStore = {
       removeStored("current_user");
       syncAuthCookie(false);
     }
+  },
+
+  // Genuine Offline / Local Fallback Mode: Strict Password Registration
+  registerLocalUser: async (
+    email: string,
+    password: string,
+    displayName: string
+  ): Promise<{ success: boolean; user?: Profile; error?: string }> => {
+    const cleanEmail = email.trim().toLowerCase();
+    if (!cleanEmail || !cleanEmail.includes('@')) {
+      return { success: false, error: "Please enter a valid email address." };
+    }
+    if (!password || password.length < 6) {
+      return { success: false, error: "Password must be at least 6 characters long." };
+    }
+    const creds = getLocalCredentials();
+    if (creds[cleanEmail]) {
+      return { success: false, error: "An account with this email already exists ♡ Please log in." };
+    }
+
+    const localId = `user-${cleanEmail.replace(/[^a-z0-9]/g, '')}`;
+    const password_hash = await hashPassword(password);
+    const now = new Date().toISOString();
+    const finalName = displayName.trim() || cleanEmail.split('@')[0];
+
+    const newCred: LocalUserCredential = {
+      id: localId,
+      email: cleanEmail,
+      password_hash,
+      display_name: finalName,
+      created_at: now,
+    };
+
+    creds[cleanEmail] = newCred;
+    saveLocalCredentials(creds);
+
+    const profile: Profile = {
+      id: localId,
+      display_name: finalName,
+      nickname: `${finalName} ♡`,
+      created_at: now,
+    };
+
+    memoryStore.setCurrentUser(profile);
+    return { success: true, user: profile };
+  },
+
+  // Genuine Offline / Local Fallback Mode: Strict Password Authentication
+  authenticateLocalUser: async (
+    email: string,
+    password: string
+  ): Promise<{ success: boolean; user?: Profile; error?: string }> => {
+    const cleanEmail = email.trim().toLowerCase();
+    if (!cleanEmail || !password) {
+      return { success: false, error: "Please enter your email and password." };
+    }
+
+    const creds = getLocalCredentials();
+    const cred = creds[cleanEmail];
+
+    if (!cred) {
+      return { success: false, error: "Invalid email or password." };
+    }
+
+    const password_hash = await hashPassword(password);
+    if (cred.password_hash !== password_hash) {
+      return { success: false, error: "Invalid email or password." };
+    }
+
+    const profile: Profile = {
+      id: cred.id,
+      display_name: cred.display_name,
+      nickname: `${cred.display_name} ♡`,
+      created_at: cred.created_at,
+    };
+
+    memoryStore.setCurrentUser(profile);
+    return { success: true, user: profile };
   },
 
   // Active World for Currently Logged-in User

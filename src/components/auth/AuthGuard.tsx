@@ -22,13 +22,11 @@ export function AuthGuard({ children }: AuthGuardProps) {
     async function checkAuth() {
       // 1. Check Supabase auth session if available
       const supabase = createClient();
-      let hasUser = false;
 
       if (supabase) {
         try {
           const { data: { user } } = await supabase.auth.getUser();
           if (user) {
-            hasUser = true;
             // Ensure local store profile is synced
             const currentUser = memoryStore.getCurrentUser();
             if (!currentUser || currentUser.id !== user.id) {
@@ -57,31 +55,46 @@ export function AuthGuard({ children }: AuthGuardProps) {
               }
               return;
             }
+
+            if (isMounted) {
+              setAuthorized(true);
+            }
+            return;
+          } else {
+            // Supabase is configured, but session is invalid/missing: strictly redirect to login
+            if (isMounted) {
+              const redirectUrl = pathname ? `/login?redirect=${encodeURIComponent(pathname)}` : '/login';
+              router.replace(redirectUrl);
+            }
+            return;
           }
         } catch (err) {
           console.warn("Supabase auth check error", err);
-        }
-      }
-
-      // 2. Client cache check (for offline/dev fallback)
-      if (!hasUser) {
-        const localUser = memoryStore.getCurrentUser();
-        if (!localUser) {
-          const redirectUrl = pathname ? `/login?redirect=${encodeURIComponent(pathname)}` : '/login';
           if (isMounted) {
+            const redirectUrl = pathname ? `/login?redirect=${encodeURIComponent(pathname)}` : '/login';
             router.replace(redirectUrl);
           }
           return;
         }
+      }
 
-        // Check world membership in local store
-        const couple = memoryStore.getCouple();
-        if (!couple) {
-          if (isMounted) {
-            router.replace('/onboarding/create');
-          }
-          return;
+      // 2. Client cache check ONLY when Supabase is NOT configured (genuine offline/local fallback)
+      const localUser = memoryStore.getCurrentUser();
+      if (!localUser) {
+        const redirectUrl = pathname ? `/login?redirect=${encodeURIComponent(pathname)}` : '/login';
+        if (isMounted) {
+          router.replace(redirectUrl);
         }
+        return;
+      }
+
+      // Check world membership in local store
+      const couple = memoryStore.getCouple();
+      if (!couple) {
+        if (isMounted) {
+          router.replace('/onboarding/create');
+        }
+        return;
       }
 
       if (isMounted) {

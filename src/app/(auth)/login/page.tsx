@@ -56,31 +56,31 @@ function LoginContent() {
           email: email.trim(),
           password,
         });
-        if (error) {
-          setErrorMessage(error.message || "Invalid email or password.");
+
+        if (error || !data?.user) {
+          setErrorMessage(error?.message || "Invalid email or password.");
           setLoading(false);
           return;
         }
 
-        if (data.user) {
-          const displayName = data.user.user_metadata?.display_name || email.trim().split('@')[0];
-          memoryStore.setCurrentUser({
-            id: data.user.id,
-            display_name: displayName,
-            nickname: `${displayName} ♡`,
-            created_at: data.user.created_at,
-          });
+        const user = data.user;
+        const displayName = user.user_metadata?.display_name || email.trim().split('@')[0];
+        memoryStore.setCurrentUser({
+          id: user.id,
+          display_name: displayName,
+          nickname: `${displayName} ♡`,
+          created_at: user.created_at,
+        });
 
-          // Check if user belongs to a world
-          const { data: membership } = await supabase
-            .from('couple_members')
-            .select('couple_id, role, couples(*)')
-            .eq('user_id', data.user.id)
-            .maybeSingle();
+        // Check if user belongs to a world
+        const { data: membership } = await supabase
+          .from('couple_members')
+          .select('couple_id, role, couples(*)')
+          .eq('user_id', user.id)
+          .maybeSingle();
 
-          if (membership && membership.couples) {
-            memoryStore.setCouple(membership.couples as unknown as Couple);
-          }
+        if (membership && membership.couples) {
+          memoryStore.setCouple(membership.couples as unknown as Couple);
         }
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : "Could not connect to authentication server.";
@@ -89,16 +89,20 @@ function LoginContent() {
         return;
       }
     } else {
-      // Local account session
-      const cleanEmail = email.trim().toLowerCase();
-      const displayName = cleanEmail.split('@')[0];
-      const localId = `user-${cleanEmail.replace(/[^a-z0-9]/g, '')}`;
-      memoryStore.setCurrentUser({
-        id: localId,
-        display_name: displayName,
-        nickname: `${displayName} ♡`,
-        created_at: "2026-01-01T00:00:00.000Z",
-      });
+      // Genuine offline / local fallback mode: strict password verification
+      try {
+        const result = await memoryStore.authenticateLocalUser(email.trim(), password);
+        if (!result.success || !result.user) {
+          setErrorMessage(result.error || "Invalid email or password.");
+          setLoading(false);
+          return;
+        }
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : "Authentication error.";
+        setErrorMessage(msg);
+        setLoading(false);
+        return;
+      }
     }
 
     setLoading(false);
